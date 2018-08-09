@@ -13,18 +13,23 @@ module Fetchers
       local_path = if target.is_a?(String)
                      resolve_from_string(target)
                    elsif target.is_a?(Hash)
+                     # If target is a Hash then it is a dependency. We should
+                     # archive it in order to create a checksum and vendor it.
+                     do_vendor = true
                      resolve_from_hash(target)
                    end
 
-      new(local_path) if local_path
+      new(local_path, do_vendor: do_vendor) if local_path
     end
 
     def self.resolve_from_hash(target)
       return unless target.key?(:path)
 
-      local_path = target[:path]
-      local_path = File.expand_path(local_path, target[:cwd]) if target.key?(:cwd)
-      local_path
+      if target.key?(:cwd)
+        File.expand_path(target[:path], target[:cwd])
+      else
+        target[:path]
+      end
     end
 
     def self.resolve_from_string(target)
@@ -39,12 +44,35 @@ module Fetchers
       target if File.exist?(target)
     end
 
-    def initialize(target)
+    def initialize(target, opts)
       @target = target
+      @do_vendor = opts[:do_vendor]
     end
 
-    def fetch(_path)
-      archive_path
+    def fetch(path)
+      return @target unless @do_vendor
+
+      if File.directory?(@target)
+        # Create an archive, checksum, and move to the vendor directory
+        Dir.mktmpdir do |tmpdir|
+          final_path = File.join(tmpdir, "#{File.basename(@target)}.tar.gz")
+          opts = {
+            backend: Inspec::Backend.create(target: 'mock://'),
+            output: final_path,
+          }
+          Inspec::Profile.for_target(@target, opts).archive(opts)
+          # Reassign `@target` for `#cache_key`
+          @target = final_path
+          FileUtils.mv(archive_path, File.join(path, "#{cache_key}.tar.gz"))
+        end
+      else
+        # Verify profile (archive) is valid and extract to vendor directory
+        opts = { backend: Inspec::Backend.create(target: 'mock://')}
+        Inspec::Profile.for_target(@target, opts).check
+        Inspec::FileProvider.for_path(@target).extract(path)
+      end
+
+      @target
     end
 
     def archive_path
